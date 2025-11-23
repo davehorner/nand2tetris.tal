@@ -1,0 +1,504 @@
+(md 
+# From NAND to Tetris in Uxntal. )
+
+( MACROS )
+%:DBG ( -- ) { print/newline [ LIT2 -T -System/debug ] DEO }
+
+( STRING MACROS 
+
+  These are used to represent non printable ASCII characters in 
+  strings, all string macros begin with \ to emulate string
+  interpolation syntax. )
+%\n { 0a }  ( newline )
+%\t { 09 }  ( tab )
+%\0 { 00 }  ( null )
+%\s { 20 }  ( space )
+%\e { 1b }  ( escape )
+
+( ANSI ESCAPE CODES 
+
+  These are used to stylize the output. )
+%\CSI { \e "[ }
+%\TERMINATOR { "m }
+%\RESET { \CSI \TERMINATOR }
+%\TRUE-COLOR { "38;2; }
+                             ( R   G   B )
+%\GREEN   { \CSI \TRUE-COLOR "128;255;128 \TERMINATOR }
+%\RED     { \CSI \TRUE-COLOR "255;128;128 \TERMINATOR }
+%\CYAN    { \CSI \TRUE-COLOR "128;255;255 \TERMINATOR }
+%\YELLOW  { \CSI \TRUE-COLOR "255;255;128 \TERMINATOR }
+%\MAGENTA { \CSI \TRUE-COLOR "255;128;255 \TERMINATOR }
+
+( DEVICES )
+|0e @System/debug $1
+|18 @Console/write $1
+|20 @Screen [
+	&vector $2 
+	&width $2 
+	&height $2 
+	&auto $2 
+	&x $2 
+	&y $2 
+	&addr $2 
+	&pixel $1 
+	&sprite $1 ]
+
+( ENUMERATIONS )
+@ClockSpeed [
+	|00 &fast+4 $1
+	|01 &fast+3 $1
+	|03 &fast+2 $1
+	|07 &fast+1 $1
+	|0f &normal $1
+	|1f &slow+1 $1
+	|3f &slow+2 $1
+	|7f &slow+3 $1
+	|ff &slow+4 $1 ]
+
+( CONSTANTS )
+|00 @F @F16 $1 @T
+|ffff @T16
+|0000 @F-F
+|0001 @F-T
+|0100 @T-F
+|0101 @T-T
+
+|10 @BUS
+|4000 @RAM/SIZE
+|4e20 @ROM/START
+
+( STATE )
+|000 
+@REG
+	&A $2 
+	&D $2
+	&PC $2
+
+( ENTRY POINT )
+|100
+@on-reset ( -> )
+	;ROM/START .REG/PC STZ2
+	
+	;Clock/timer .Screen/vector DEO2
+
+	.T test/set-verbosity
+	test
+
+	:DBG
+	BRK
+
+( ## GATES 
+
+  ### Simple Gates
+
+  Simple gates are implemented as functions that accept boolean byte
+  values, .T 1 bit true (01) and .F false (00), although we only 
+  really need the zero-th bit. Uxn words are 8 bits and doubles are
+  16 bits. )
+@nand ( a b -- out ) AND .F EQU JMP2r
+@and ( a b -- out ) nand ( >> )
+@not ( a -- out ) DUP !nand
+@or ( a b -- out ) not SWP !if-x-then-y
+@nor ( a b -- out ) or !not
+@xor ( a b -- out ) DUP2 not-x-and-y STH x-and-not-y STHr !or
+@mux ( a b sel -- out ) DUP not STH and STH SWPr STHr and STHr !or
+@dmux ( in sel -- a b ) DUP2 and STH x-and-not-y STHr JMP2r
+
+%NAND ( a b -- out ) { AND NOT }
+%NOT ( a -- out ) { .F EQU }
+%OR ( a b -- out ) { ORA }
+%NOR ( a b -- out ) { OR NOT }
+%XOR ( a b -- out ) { EOR }
+%MUX ( a b sel -- out ) { JMP SWP NIP }
+%DMUX ( in sel -- a b ) { DUP2k EOR2 ROT EQU JMP SWP }
+
+@3and ( a b c -- out ) and !and
+@equ ( a b -- out ) xor !not
+@zero ( a b -- out ) POP2 .F JMP2r
+@one ( a b -- out ) POP2 .T JMP2r
+@x ( x y -- out ) POP JMP2r
+@y ( x y -- out ) NIP JMP2r
+@not-y ( x y -- out ) y !not
+@not-x ( x y -- out ) x !not
+@x-and-not-y ( x y -- out ) not !and
+@not-x-and-y ( x y -- out ) not !nor
+@if-x-then-y ( x y -- out ) not !nand
+@if-y-then-x ( x y -- out ) not !or
+
+%3AND ( a b c -- out ) { AND AND }
+%ZERO ( a b -- out ) { POP2 .F }
+%ONE ( a b -- out ) { POP2 .T }
+%X ( a b -- out ) { POP }
+%Y ( a b -- out ) { NIP }
+%NOT-X ( a b -- out ) { X NOT }
+%NOT-Y ( a b -- out ) { Y NOT }
+%X-AND-NOT-Y ( a b -- out ) { NOT AND }
+%NOT-X-AND-Y ( a b -- out ) { SWP X-AND-NOT-Y }
+%IF-X-THEN-Y ( a b -- out ) { NOT NAND }
+%IF-Y-THEN-X ( a b -- out ) { SWP IF-X-THEN-Y }
+    	
+@DFF ( in id* -- out ) DUP2 LDA STH STA STHr JMP2r
+%:DFF ( in id* -- out ) { DUP2 LDA STH STA STHr }
+
+ 
+( ### Multi-bit Gates
+
+  These are implemented using short (double word) mode opcodes, 
+  because Uxn has 64Kib of main RAM, using a byte to represent 
+  each bit would be a bad idea, we could also extract each bit and
+  iterate->apply to construct a result similar to the HDL language.
+  
+  However for implementation and performance reasons I thought it
+  was redundant and the API just implies working on n-bits, by 
+  generalization 16-bits. 
+
+  The inputs and outputs are 16-bits, 16-bits false ;F16 (0000) and 
+  16-bits true ;T16 (ffff). )
+@nand16 ( a* b* -- out* ) AND2 ;T16 EOR2 JMP2r
+@and16 ( a* b* -- out* ) nand16 ( >> )
+@not16 ( a* -- out* ) DUP2 !nand16
+@or16 ( a* b* -- out* ) not16 SWP2 not16 !nand16
+@nor16 ( a* b* -- out* ) or16 !not16
+@xor16 ( a* b* -- out* ) 
+	OVR2 OVR2 not16 nand16 STH2 SWP2 not16 nand16 STH2r !nand16
+@equ16 ( a* b* -- out* ) 
+	OVR2 OVR2 not16 SWP2 not16 and16 STH2 and16 STH2r !or16
+@mux16 ( a* b* sel* -- out* ) DUP not STH and STH SWPr STHr and STHr !or
+@dmux16 ( sel -- a b ) 
+@zero16 ( a b -- out ) POP2 POP2 ;F16 JMP2r
+@one16 ( a b -- out ) POP2 POP2 ;T16 JMP2r
+@x16 ( x y -- out ) POP JMP2r
+@y16 ( x y -- out ) NIP JMP2r
+@not-y16 ( x y -- out ) NIP !not
+@not-x16 ( x y -- out ) POP !not
+@not-x-and-y16 ( x y -- out ) SWP ( >> )
+@x-and-not-y16 ( x y -- out ) not !and
+@if-x-then-y16 ( x y -- out ) SWP ( >> )
+@if-y-then-x16 ( x y -- out ) not !or
+
+@DFF16 ( in -- out )
+
+@Clock/speed-set ( Speed -- ) ,/speed STR JMP2r
+@Clock/timer ( -> )
+	[ LIT &time $1 ] INCk ,/time STR
+	[ LIT &speed $1 ] AND ?{
+		!/tick }
+	BRK
+	
+@Clock/tick ( -> )
+	#2a18 DEO
+	#010f DEO
+	( >> )
+	
+	&tock ( -> ) BRK
+
+( TESTS )
+@test/get-verbosity ( -- f ) [ LIT &verbose $1 ] #00 EQU JMP2r
+@test/set-verbosity ( f -- ) ,/verbose STR JMP2r
+@test/assert ( test-number flag -- )
+	?{ 
+		[ LIT2 &failed $2 ] INC2 ,/failed STR2
+		;msgs/failed !/result }
+	[ LIT2 &passed $2 ] INC2 ,/passed STR2
+	/get-verbosity ?{
+		;msgs/passed ( >> )
+	
+		&result ( test-number str* -- )
+			/print-id ROT print/magenta print/byte-dec 
+			;msgs/spacer print/string !print/string }
+	POP JMP2r
+
+@test/summary ( -- )
+	print/newline
+	
+	,/failed LDR2 STH2k ORA ?{ 
+		;msgs/success print/string !/continue }
+
+	STH2kr ;msgs/total-failed /report
+
+	&continue ( | failed* -- )
+		,/passed LDR2 STH2k ORA ?{ 
+			;msgs/everything-is-fine print/string }
+
+		STH2kr ;msgs/total-passed /report	
+		STH2r STH2r ADD2 ;msgs/total-tests /report
+		/get-verbosity ?{
+			,/sets LDR2 ;msgs/total-sets /report
+			,/subsets LDR2 ;msgs/total-subsets !/report }
+		JMP2r
+
+@test/report ( total* str* -- ) print/string print/short-dec !print/newline
+@test/print-id ( -- )
+	print/yellow
+	,/current-set LDR2 print/string
+	print/spacer
+	print/cyan
+	,/current-subset LDR2 print/string
+	!print/spacer
+
+@test/set ( name* -- )
+	[ LIT2 &sets $2 ] INC2 ,/sets STR2
+	,/current-set STR2
+	/get-verbosity ?{
+		!print/newline }
+	JMP2r
+		&current-set $2
+
+@test/subset ( name* -- )
+	[ LIT2 &subsets $2 ] INC2 ,/subsets STR2
+	,/current-subset STR2
+	/get-verbosity ?{
+		!print/newline }
+	JMP2r
+		&current-subset $2
+
+@test/end-set ( -- ) ;msgs/null ,/current-set STR2 ( >> )
+@test/end-subset ( -- ) ;msgs/null ,/current-subset STR2 JMP2r
+
+@test/gates ( -- )
+	;msgs/gates /set
+		
+	;msgs/nand /subset	
+	#01 [ ;F-F nand .T EQU ] [ ;F-F NAND .T EQU ] EQU /assert
+	#02 [ ;F-T nand .T EQU ] [ ;F-T NAND .T EQU ] EQU /assert
+	#03 [ ;T-F nand .T EQU ] [ ;T-F NAND .T EQU ] EQU /assert
+	#04 [ ;T-T nand .F EQU ] [ ;T-T NAND .F EQU ] EQU /assert
+    
+	;msgs/and /subset
+		 ( a b )
+	#01 [ ;F-F and ] .F EQU /assert	
+	#02 [ ;F-T and ] .F EQU /assert
+	#03 [ ;T-F and ] .F EQU /assert
+	#04 [ ;T-T and ] .T EQU /assert
+    
+	;msgs/not /subset
+         ( a )
+	#01 [ .F not ] .T EQU /assert
+	#02 [ .T not ] .F EQU /assert
+    
+	;msgs/or /subset
+         ( a b )
+	#01 [ ;F-F or ] .F EQU /assert
+	#02 [ ;F-T or ] .T EQU /assert
+	#03 [ ;T-F or ] .T EQU /assert
+	#04 [ ;T-T or ] .T EQU /assert
+    
+	;msgs/xor /subset
+         ( a b )
+	#01 [ ;F-F xor ] .F EQU /assert
+	#02 [ ;F-T xor ] .T EQU /assert
+	#03 [ ;T-F xor ] .T EQU /assert
+	#04 [ ;T-T xor ] .F EQU /assert
+    
+	;msgs/nor /subset
+         ( a b )
+	#01 [ ;F-F nor ] .T EQU /assert
+	#02 [ ;F-T nor ] .F EQU /assert
+	#03 [ ;T-F nor ] .F EQU /assert
+	#04 [ ;T-T nor ] .F EQU /assert
+    
+	;msgs/equ /subset
+         ( a b )
+	#01 [ ;F-F equ ] .T EQU /assert
+	#02 [ ;F-T equ ] .F EQU /assert
+	#03 [ ;T-F equ ] .F EQU /assert
+	#04 [ ;T-T equ ] .T EQU /assert
+    
+	;msgs/mux /subset
+         ( a b  s )
+	#01 [ ;F-F .F mux ] .F EQU /assert
+	#02 [ ;F-T .F mux ] .F EQU /assert
+	#03 [ ;T-F .F mux ] .T EQU /assert
+	#04 [ ;T-T .F mux ] .T EQU /assert
+	#05 [ ;F-F .T mux ] .F EQU /assert
+	#06 [ ;F-T .T mux ] .T EQU /assert
+	#07 [ ;T-F .T mux ] .F EQU /assert
+	#08 [ ;T-T .T mux ] .T EQU /assert
+    
+	;msgs/dmux /subset
+         ( a b )
+	#01 [ ;T-F dmux ] ;T-F EQU2 /assert
+	#02 [ ;F-T dmux ] ;F-F EQU2 /assert
+
+	;msgs/x-and-not-y /subset
+         ( a b )
+	#01 [ ;F-F x-and-not-y ] .F EQU /assert
+	#02 [ ;F-T x-and-not-y ] .F EQU /assert
+	#03 [ ;T-F x-and-not-y ] .T EQU /assert
+	#04 [ ;T-T x-and-not-y ] .F EQU /assert
+    
+	;msgs/not-x-and-y /subset
+         ( a b )
+	#01 [ ;F-F not-x-and-y ] .F EQU /assert
+	#02 [ ;F-T not-x-and-y ] .T EQU /assert
+	#03 [ ;T-F not-x-and-y ] .F EQU /assert
+	#04 [ ;T-T not-x-and-y ] .F EQU /assert
+
+	;msgs/constant-0 /subset
+         ( a b )
+	#01 [ ;F-F zero ] .F EQU /assert
+	#02 [ ;F-T zero ] .F EQU /assert
+	#03 [ ;T-F zero ] .F EQU /assert
+	#04 [ ;T-T zero ] .F EQU /assert
+    
+	;msgs/constant-1 /subset
+         ( a b )
+	#01 [ ;F-F one ] .T EQU /assert
+	#02 [ ;F-T one ] .T EQU /assert
+	#03 [ ;T-F one ] .T EQU /assert
+	#04 [ ;T-T one ] .T EQU /assert
+    
+	;msgs/x /subset
+         ( a b )
+	#01 [ ;F-F x ] .F EQU /assert
+	#02 [ ;F-T x ] .F EQU /assert
+	#03 [ ;T-F x ] .T EQU /assert
+	#04 [ ;T-T x ] .T EQU /assert
+    
+	;msgs/y /subset
+         ( a b )
+	#01 [ ;F-F y ] .F EQU /assert
+	#02 [ ;F-T y ] .T EQU /assert
+	#03 [ ;T-F y ] .F EQU /assert
+	#04 [ ;T-T y ] .T EQU /assert
+    
+	;msgs/not-x /subset
+         ( a b )
+	#01 [ ;F-F not-x ] .T EQU /assert
+	#02 [ ;F-T not-x ] .T EQU /assert
+	#03 [ ;T-F not-x ] .F EQU /assert
+	#04 [ ;T-T not-x ] .F EQU /assert
+    	
+	;msgs/not-y /subset
+         ( a b )
+	#01 [ ;F-F not-y ] .T EQU /assert
+	#02 [ ;F-T not-y ] .F EQU /assert
+	#03 [ ;T-F not-y ] .T EQU /assert
+	#04 [ ;T-T not-y ] .F EQU /assert
+    	
+	;msgs/if-x-then-y /subset
+         ( a b )
+	#01 [ ;F-F if-x-then-y ] .T EQU /assert
+	#02 [ ;F-T if-x-then-y ] .T EQU /assert
+	#03 [ ;T-F if-x-then-y ] .F EQU /assert
+	#04 [ ;T-T if-x-then-y ] .T EQU /assert
+    	
+	;msgs/if-y-then-x /subset
+         ( a b )
+	#01 [ ;F-F if-y-then-x ] .T EQU /assert
+	#02 [ ;F-T if-y-then-x ] .F EQU /assert
+	#03 [ ;T-F if-y-then-x ] .T EQU /assert
+	#04 [ ;T-T if-y-then-x ] .T EQU /assert
+
+	!/end-set
+
+@test/chips ( -- )
+	;msgs/chips /set
+	;msgs/dff /subset
+         ( a id*   )
+	#01 [ .T #8000 DFF ] .F EQU /assert
+	#02 [ .F #8000 DFF ] .T EQU /assert
+	#03 [ .F #8000 DFF ] .F EQU /assert
+	#04 [ .T #8000 DFF ] .F EQU /assert
+	#05 [ .F #8000 DFF ] .T EQU /assert
+
+	(
+	;msgs/srl /subset
+         ( a b )
+	#01 [ ;F-F .F srl ] ;F-T EQU2 /assert ( start )
+	#02 [ ;T-F .F srl ] ;T-F EQU2 /assert ( set )
+	#03 [ ;F-F .F srl ] ;T-F EQU2 /assert ( hold )
+	#04 [ ;F-T .F srl ] ;F-T EQU2 /assert ( reset )
+	( #05 [ ;T-T .F srl ] .Error/SRL /assert-error ( forbiden ) ) )
+
+	!/end-set
+
+@test ( -- )
+	/gates
+	/chips
+	!/summary
+
+( STDLIB  )
+@print/newline ( -- ) ;msgs/newline ( >> )
+@print/string ( zstr* -- ) LDAk #18 DEO INC2 LDAk ?/string POP2 JMP2r
+@print/magenta ( -- ) ;msgs/magenta !/string
+@print/green ( -- ) ;msgs/green !/string
+@print/red ( -- ) ;msgs/red !/string
+@print/yellow ( -- ) ;msgs/yellow !/string
+@print/cyan ( -- ) ;msgs/cyan !/string
+@print/reset ( -- ) ;msgs/reset !/string
+@print/spacer ( -- ) ;msgs/spacer !/string
+@print/short ( short* -- ) SWP /byte ( >> )
+@print/byte ( byte -- ) DUP #04 SFT /nibble ( >> )
+@print/nibble ( byte -- ) 
+	#0f AND DUP #09 GTH #27 MUL ADD [ LIT "0 ] ADD #18 DEO JMP2r
+	
+@print/short-dec ( short* -- )
+	#000a SWP2 [ LITr ff ]
+	&>get ( -- )
+		SWP2k DIV2k MUL2 SUB2 STH
+		POP OVR2 DIV2 ORAk ?&>get
+	POP2 POP2
+	&>put ( -- )
+		STHr INCk ?{ POP JMP2r }
+		[ LIT "0 ] ADD #18 DEO !&>put
+
+@print/byte-dec ( dec -- )
+	DUP #64 DIV /byte-num-try
+	DUP #0a DIV /byte-num-try
+	( >> )
+
+@print/byte-num ( num -- )
+	#0a DIVk MUL SUB [ LIT "0 ] ADD #18 DEO
+	JMP2r
+	&byte-num-try ( num -- )
+		DUP ?/byte-num
+		POP JMP2r
+
+( STRINGS )		
+@msgs
+	&gates "GATES \0
+	&chips "CHIPS \0
+	&nand "NAND \0
+	&and "AND \0
+	&not "NOT \0
+	&or "OR \0
+	&nor "NOR \0
+	&equ "EQU \0
+	&xor "XOR \0
+	&mux "MUX \0
+	&dmux "DMUX \0
+	&x-and-not-y "X_&_!Y \0
+	&not-x-and-y "!X_&_Y \0
+	&constant-0 "ZERO \0
+	&constant-1 "ONE \0
+	&x "X \0
+	&y "Y \0
+	&not-x "!X \0
+	&not-y "!Y \0
+	&if-x-then-y "!X_|_Y \0
+	&if-y-then-x "X_|_!Y \0
+	&dff "DFF \0
+	&srl "SRL \0
+	&total-tests "TOTAL \s "TESTS: \s \0
+	&total-sets "TOTAL \s "SETS: \s \0
+	&total-subsets "TOTAL \s "SUBSETS: \s \0
+	&passed \GREEN "PASSED \RESET \n \0
+	&failed \RED "FAILED \RESET \n \0
+	&success "+ \s \GREEN "SUCCESS! \RESET \n \0
+	&total-passed "* \s \GREEN "TOTAL \s "PASSED \RESET ": \s \0
+	&total-failed "* \s \RED "TOTAL \s "FAILED \RESET ": \s \0
+	&everything-is-fine 
+		"+ \s \RED "EVERYTHING \s "IS \s "FINE! \RESET \s "🔥🐶☕🔥 \n \0
+	&newline \n \0
+	&spacer \RESET ": \t \0
+	&cyan \CYAN \0
+	&yellow \YELLOW \0
+	&magenta \MAGENTA \0
+	&green \GREEN \0
+	&red \RED \0
+	&reset \RESET \0
+	&null \0
+
+( HACK RAM )
+|ROM/START @ROM
